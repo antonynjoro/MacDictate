@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - Logging
 
@@ -7,9 +8,14 @@ import Foundation
 ///
 /// - `debug` is compiled out of release builds and takes its message as an
 ///   `@autoclosure`, so interpolation cost is never paid when DEBUG is off.
-/// - `error` always prints — it's for failures the user/operator should see in
-///   any build.
+/// - `info`/`error` always log — via os.Logger, NOT NSLog: the unified log
+///   redacts NSLog's dynamic content to `<private>` regardless of format
+///   specifiers (`%{public}@` is honored by os_log only — verified in the
+///   field 2026-07-03). `privacy: .public` on the interpolation is the only
+///   thing that keeps `log show` output readable.
 enum Log {
+
+    private static let logger = os.Logger(subsystem: "com.zerog.app", category: "app")
 
     /// Verbose / developer-only logging. No-op in release builds.
     static func debug(_ tag: String, _ message: @autoclosure () -> String) {
@@ -24,15 +30,12 @@ enum Log {
     /// failure from `log show` without a debug build. Never log transcript
     /// content here — lengths and durations only.
     static func info(_ tag: String, _ message: String) {
-        NSLog("%{public}@", "[\(tag)] \(message)")
+        logger.log("[\(tag, privacy: .public)] \(message, privacy: .public)")
     }
 
     /// Always-on logging for failures and operationally significant events.
-    /// Uses NSLog so the message lands in the unified log (visible in Console
-    /// filtered by process "ZeroG") — `print` only reaches stdout, which Console
-    /// does not capture for a GUI app launched via Finder/`open`.
+    /// Lands in the unified log (Console, filtered by process "ZeroG").
     static func error(_ tag: String, _ message: String) {
-        // %{public}@ so the message isn't redacted to <private> in the unified log.
-        NSLog("%{public}@", "[\(tag)] \(message)")
+        logger.error("[\(tag, privacy: .public)] \(message, privacy: .public)")
     }
 }

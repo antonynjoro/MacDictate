@@ -257,11 +257,11 @@ final class KeyMonitor {
 
             guard state.isReady else {
                 Log.info("KeyMonitor", "Press ignored — app busy (state: \(state))")
-                // The user's speech after this press is NOT being recorded.
-                // Make that audible instead of silently eating it.
-                if case .processing = state {
-                    NSSound(named: "Basso")?.play()
-                }
+                // The user's speech after this press is NOT being recorded —
+                // whether we're still loading the model (~45s after launch) or
+                // mid-transcription. Make that audible instead of silently
+                // eating it.
+                NSSound(named: "Basso")?.play()
                 return
             }
 
