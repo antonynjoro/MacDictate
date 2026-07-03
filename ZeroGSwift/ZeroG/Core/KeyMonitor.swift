@@ -44,6 +44,16 @@ final class KeyMonitor {
     private let maxRecordingDuration: TimeInterval = 120.0
     private var timeoutTimer: Timer?
 
+    /// Watchdog that polls the physical trigger-key state while recording.
+    /// Some keys — notably Fn/Globe when macOS maps it to a system action like
+    /// "Show Emoji & Symbols" — get their key-up event swallowed by the OS before
+    /// it reaches our listen-only tap. Without this, a swallowed release strands
+    /// the mic on (no `flagsChanged` ever clears `isTriggerKeyPressed`). The
+    /// watchdog detects the key is no longer physically down and forces release.
+    /// Active only between press and release, so idle CPU is unaffected.
+    private var releaseWatchdog: Timer?
+    private let releaseWatchdogInterval: TimeInterval = 0.12
+
     // MARK: Lifecycle
 
     init(
@@ -149,6 +159,7 @@ final class KeyMonitor {
     func stop() {
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        stopReleaseWatchdog()
 
         NotificationCenter.default.removeObserver(self)
 
@@ -179,6 +190,7 @@ final class KeyMonitor {
             isTriggerKeyPressed = false
             timeoutTimer?.invalidate()
             timeoutTimer = nil
+            stopReleaseWatchdog()
             DispatchQueue.main.async { [weak self] in
                 self?.onStopRecording()
             }
@@ -254,6 +266,7 @@ final class KeyMonitor {
                 self.stateMachine.transition(to: .recording)
                 self.onStartRecording()
                 self.startTimeoutTimer()
+                self.startReleaseWatchdog()
             default:
                 break
             }
@@ -264,6 +277,7 @@ final class KeyMonitor {
         isTriggerKeyPressed = false
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        stopReleaseWatchdog()
 
         DispatchQueue.main.async { [weak self] in
             self?.onStopRecording()
@@ -282,7 +296,37 @@ final class KeyMonitor {
             Log.debug("KeyMonitor", "Recording timeout (\(self.maxRecordingDuration)s) — forcing stop.")
 
             self.isTriggerKeyPressed = false
+            self.stopReleaseWatchdog()
             self.onStopRecording()
         }
+    }
+
+    // MARK: - Release Watchdog
+
+    /// Begin polling the physical trigger-key state. Catches a swallowed key-up
+    /// (e.g. OS-intercepted Fn/Globe) that would otherwise leave the mic stuck on.
+    private func startReleaseWatchdog() {
+        releaseWatchdog?.invalidate()
+        releaseWatchdog = Timer.scheduledTimer(withTimeInterval: releaseWatchdogInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.isTriggerKeyPressed else {
+                self.stopReleaseWatchdog()
+                return
+            }
+            // Live session modifier flags — same domain as the flagsChanged
+            // events we consume. Per-keycode keyState is unreliable for held
+            // modifiers (Right Shift reads "up" mid-hold → false stop).
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            let stillDown = flags.contains(self.triggerKey.familyFlagMask)
+            if !stillDown {
+                Log.debug("KeyMonitor", "Watchdog: \(self.triggerKey.displayName) release was missed — forcing stop.")
+                self.triggerReleased()
+            }
+        }
+    }
+
+    private func stopReleaseWatchdog() {
+        releaseWatchdog?.invalidate()
+        releaseWatchdog = nil
     }
 }
