@@ -18,6 +18,15 @@ enum Log {
         #endif
     }
 
+    /// Always-on breadcrumb for the dictation pipeline (press/release/stop
+    /// reason, audio + inference durations, paste outcome). Sparse by design —
+    /// a handful of lines per dictation, enough to reconstruct a flaky field
+    /// failure from `log show` without a debug build. Never log transcript
+    /// content here — lengths and durations only.
+    static func info(_ tag: String, _ message: String) {
+        NSLog("%{public}@", "[\(tag)] \(message)")
+    }
+
     /// Always-on logging for failures and operationally significant events.
     /// Uses NSLog so the message lands in the unified log (visible in Console
     /// filtered by process "ZeroG") — `print` only reaches stdout, which Console

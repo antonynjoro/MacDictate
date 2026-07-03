@@ -256,13 +256,19 @@ final class KeyMonitor {
             let state = self.stateMachine.currentState
 
             guard state.isReady else {
-                Log.debug("KeyMonitor", "Ignoring \(self.triggerKey.displayName) press — app not ready (state: \(state))")
+                Log.info("KeyMonitor", "Press ignored — app busy (state: \(state))")
+                // The user's speech after this press is NOT being recorded.
+                // Make that audible instead of silently eating it.
+                if case .processing = state {
+                    NSSound(named: "Basso")?.play()
+                }
                 return
             }
 
             switch state {
             case .idle, .success, .error, .needsPermission:
                 self.recordingStartTime = Date()
+                Log.info("KeyMonitor", "Press → recording (\(self.triggerKey.displayName))")
                 self.stateMachine.transition(to: .recording)
                 self.onStartRecording()
                 self.startTimeoutTimer()
@@ -279,6 +285,9 @@ final class KeyMonitor {
         timeoutTimer = nil
         stopReleaseWatchdog()
 
+        let held = recordingStartTime.map { String(format: "%.1fs", Date().timeIntervalSince($0)) } ?? "?"
+        Log.info("KeyMonitor", "Release → stop recording (held \(held))")
+
         DispatchQueue.main.async { [weak self] in
             self?.onStopRecording()
         }
@@ -293,7 +302,7 @@ final class KeyMonitor {
         timeoutTimer = Timer.scheduledTimer(withTimeInterval: maxRecordingDuration, repeats: false) { [weak self] _ in
             guard let self else { return }
 
-            Log.debug("KeyMonitor", "Recording timeout (\(self.maxRecordingDuration)s) — forcing stop.")
+            Log.info("KeyMonitor", "Recording timeout (\(self.maxRecordingDuration)s) — forcing stop.")
 
             self.isTriggerKeyPressed = false
             self.stopReleaseWatchdog()
@@ -319,7 +328,7 @@ final class KeyMonitor {
             let flags = CGEventSource.flagsState(.combinedSessionState)
             let stillDown = flags.contains(self.triggerKey.familyFlagMask)
             if !stillDown {
-                Log.debug("KeyMonitor", "Watchdog: \(self.triggerKey.displayName) release was missed — forcing stop.")
+                Log.info("KeyMonitor", "Watchdog: \(self.triggerKey.displayName) release was missed — forcing stop.")
                 self.triggerReleased()
             }
         }

@@ -220,7 +220,7 @@ final class AudioRecorder: @unchecked Sendable {
         
         // Safety-only silence detection. Normal recording still ends when Control is released.
         if silenceTracker.observe(rms: rms, at: Date()) == .stop {
-            Log.debug("AudioRecorder", "Safety silence detected (>\(Config.silenceDuration)s). Auto-stopping.")
+            Log.info("AudioRecorder", "Safety silence detected (>\(Config.silenceDuration)s). Auto-stopping.")
             DispatchQueue.main.async { [weak self] in
                 self?.beginProcessing()
             }
@@ -232,24 +232,28 @@ final class AudioRecorder: @unchecked Sendable {
     /// Transcribe audio data on-device and inject the result.
     private func transcribeAndInject(audioData: [Float]) async {
         guard !audioData.isEmpty else {
+            Log.info("AudioRecorder", "No audio captured — nothing to transcribe.")
             DispatchQueue.main.async { [weak self] in
                 self?.stateMachine.transition(to: .idle)
             }
             return
         }
-        
+
         do {
             let startTime = CFAbsoluteTimeGetCurrent()
+            let audioDuration = Double(audioData.count) / AudioConstants.sampleRate
+            Log.info("AudioRecorder", "Transcribing \(String(format: "%.1f", audioDuration))s of audio...")
 
             // Transcribe
             let text = try await transcriptionEngine.transcribe(audioData)
-            
+
             let transcriptionDuration = CFAbsoluteTimeGetCurrent() - startTime
-            
-            let audioDuration = Double(audioData.count) / AudioConstants.sampleRate
-            Log.debug("AudioRecorder", "Transcribed \(String(format: "%.1f", audioDuration))s audio in \(String(format: "%.2f", transcriptionDuration))s: \(text)")
-            
+
+            Log.info("AudioRecorder", "Transcribed \(String(format: "%.1f", audioDuration))s audio in \(String(format: "%.2f", transcriptionDuration))s (\(text.count) chars)")
+            Log.debug("AudioRecorder", "Transcript: \(text)")
+
             guard !text.isEmpty else {
+                Log.info("AudioRecorder", "Empty transcription — nothing to paste.")
                 DispatchQueue.main.async { [weak self] in
                     self?.stateMachine.transition(to: .idle)
                 }
@@ -266,6 +270,7 @@ final class AudioRecorder: @unchecked Sendable {
             // Inject text. False = Accessibility missing (the injector bailed
             // before touching the pasteboard) — never show fake success.
             let injected = TextInjector.injectText(finalText)
+            Log.info("AudioRecorder", "Paste \(injected ? "OK" : "FAILED (Accessibility missing)")")
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -286,7 +291,7 @@ final class AudioRecorder: @unchecked Sendable {
             }
             
         } catch {
-            Log.debug("AudioRecorder", "Transcription error: \(error)")
+            Log.error("AudioRecorder", "Transcription error: \(error)")
             DispatchQueue.main.async { [weak self] in
                 self?.stateMachine.transition(to: .error("Processing Failed"))
                 self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
