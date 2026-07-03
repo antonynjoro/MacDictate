@@ -70,10 +70,17 @@ final class AppStateMachine: ObservableObject {
         Log.debug("StateMachine", "\(previous) → \(newState)")
     }
     
-    /// Convenience: transition to `.idle` after a delay.
+    /// Convenience: transition to `.idle` after a delay — but only if the state
+    /// hasn't moved on in the meantime. An unconditional delayed reset stomped
+    /// a recording that started within the delay window (success → recording →
+    /// timer fires → idle), which left the mic running: the release handler's
+    /// "are we recording?" check failed and the session never stopped, merging
+    /// into the next one (field-captured 2026-07-03 15:53).
     func resetToIdle(after delay: TimeInterval = Config.Timing.successReset) {
+        let scheduledFrom = currentState
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.transition(to: .idle)
+            guard let self, self.currentState == scheduledFrom else { return }
+            self.transition(to: .idle)
         }
     }
 }

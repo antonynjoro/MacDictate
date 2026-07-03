@@ -112,7 +112,11 @@ final class AudioRecorder: @unchecked Sendable {
     /// stop" sequence lives in exactly one place. Must be called on the main thread
     /// (it touches the state machine).
     func beginProcessing() {
-        guard stateMachine.currentState == .recording else { return }
+        // Gate on the recorder's own truth, not the display state: if a stray
+        // UI transition ever knocks the state machine out of .recording while
+        // the engine is still capturing, the stop must still happen — a missed
+        // stop leaves the mic running and merges this session into the next.
+        guard isRecording else { return }
         stateMachine.transition(to: .processing)
         stopRecording()
     }
