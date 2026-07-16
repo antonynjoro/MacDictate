@@ -31,7 +31,11 @@ struct TranscribingTests {
     func audioRecorderTakesProtocol() {
         let mock = MockTranscriber()
         // Compiles only if AudioRecorder's dependency is the protocol, not a concrete engine.
-        _ = AudioRecorder(stateMachine: AppStateMachine(), transcriptionEngine: mock)
+        _ = AudioRecorder(
+            stateMachine: AppStateMachine(),
+            transcriptionEngine: mock,
+            inputDeviceProvider: { nil }
+        )
     }
 
     @Test("The concrete WhisperKit engine conforms to Transcribing")

@@ -35,7 +35,11 @@ final class AudioRecorder: @unchecked Sendable {
 
     // MARK: Audio Engine
     
-    private let audioEngine = AVAudioEngine()
+    typealias CaptureSessionFactory = (AudioInputDevice) throws -> AudioCaptureSession
+
+    private let inputDeviceProvider: () -> AudioInputDevice?
+    private let captureSessionFactory: CaptureSessionFactory
+    private var captureSession: AudioCaptureSession?
     private var isRecording = false
     
     // MARK: Audio Accumulation
@@ -57,14 +61,21 @@ final class AudioRecorder: @unchecked Sendable {
     
     // MARK: Lifecycle
     
-    init(stateMachine: AppStateMachine, transcriptionEngine: Transcribing) {
+    init(
+        stateMachine: AppStateMachine,
+        transcriptionEngine: Transcribing,
+        inputDeviceProvider: @escaping () -> AudioInputDevice?,
+        captureSessionFactory: @escaping CaptureSessionFactory = AVAudioCaptureSession.init(device:)
+    ) {
         self.stateMachine = stateMachine
         self.transcriptionEngine = transcriptionEngine
+        self.inputDeviceProvider = inputDeviceProvider
+        self.captureSessionFactory = captureSessionFactory
     }
     
     // MARK: - Recording Control
     
-    /// Begin capturing audio from the default input device.
+    /// Begin capturing audio from the preferred input device.
     func startRecording() {
         guard !isRecording else { return }
         
@@ -75,34 +86,57 @@ final class AudioRecorder: @unchecked Sendable {
         }
         transcribedTexts.removeAll()
         
-        let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.inputFormat(forBus: 0)
-        
-        // Ensure we have a valid format
-        guard recordingFormat.sampleRate > 0 else {
-            DispatchQueue.main.async { [weak self] in
-                self?.stateMachine.transition(to: .error("No microphone available"))
-                self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
-            }
-            return
-        }
-        
-        // Install tap on the input node for raw audio capture
-        inputNode.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: recordingFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer, format: recordingFormat)
-        }
-        
-        do {
-            try audioEngine.start()
-            isRecording = true
-            playFeedbackSound()
+        var lastError: Error?
+        for attempt in 1...2 {
+            guard let inputDevice = inputDeviceProvider() else { break }
 
-            Log.debug("AudioRecorder", "Recording started. Format: \(recordingFormat)")
-        } catch {
-            DispatchQueue.main.async { [weak self] in
-                self?.stateMachine.transition(to: .error("Mic Error: \(error.localizedDescription)"))
-                self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
+            do {
+                let session = try captureSessionFactory(inputDevice)
+                let recordingFormat = session.recordingFormat
+                guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
+                    Log.info(
+                        "AudioRecorder",
+                        "Input route for \(inputDevice.name) was invalid; rebuilding (attempt \(attempt)/2)."
+                    )
+                    continue
+                }
+
+                session.installTap(bufferSize: AudioConstants.bufferSize) { [weak self] buffer, format in
+                    self?.processAudioBuffer(buffer, format: format)
+                }
+
+                do {
+                    try session.start()
+                } catch {
+                    session.removeTap()
+                    session.stop()
+                    throw error
+                }
+
+                captureSession = session
+                isRecording = true
+                playFeedbackSound()
+                Log.debug(
+                    "AudioRecorder",
+                    "Recording started with \(inputDevice.name). Format: \(recordingFormat)"
+                )
+                return
+            } catch {
+                lastError = error
+                Log.error(
+                    "AudioRecorder",
+                    "Could not start input route (attempt \(attempt)/2): \(error.localizedDescription)"
+                )
             }
+        }
+
+        let diagnostic = lastError.map { ": \($0.localizedDescription)" } ?? ""
+        Log.error("AudioRecorder", "No usable microphone was available\(diagnostic)")
+        DispatchQueue.main.async { [weak self] in
+            self?.stateMachine.transition(
+                to: .error("Microphone unavailable. Choose one from the ZeroG menu")
+            )
+            self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
         }
     }
     
@@ -131,8 +165,9 @@ final class AudioRecorder: @unchecked Sendable {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Config.recordingTailDuration) { [weak self] in
             guard let self else { return }
-            self.audioEngine.inputNode.removeTap(onBus: 0)
-            self.audioEngine.stop()
+            self.captureSession?.removeTap()
+            self.captureSession?.stop()
+            self.captureSession = nil
 
             let rawAudio: [Float] = self.sampleQueue.sync { self.accumulatedSamples }
             let audioData = Self.trimTrailingSilence(rawAudio)

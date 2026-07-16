@@ -39,6 +39,12 @@ enum Config {
     /// Interacts with the trailing-audio knobs — see `TranscriptionQuality`.
     static let silenceDuration: TimeInterval = 12.0
 
+    /// Last-resort cap for a recording whose trigger key appears to stay held.
+    /// The release watchdog and silence detector normally stop abandoned sessions
+    /// much sooner; this only bounds audio memory if both safeguards miss one.
+    /// Ten minutes of 16 kHz mono Float audio is roughly 38 MB.
+    static let recordingSafetyTimeout: TimeInterval = 10 * 60
+
     /// Seconds to keep recording after key release to capture trailing speech.
     /// Sourced from `TranscriptionQuality.recordingTailSeconds`.
     static let recordingTailDuration: TimeInterval = TranscriptionQuality.recordingTailSeconds

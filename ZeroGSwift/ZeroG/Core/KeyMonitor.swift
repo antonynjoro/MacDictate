@@ -40,8 +40,10 @@ final class KeyMonitor {
     private var isTriggerKeyPressed = false
     private var recordingStartTime: Date?
 
-    /// Safety timeout to prevent stuck recording state (2 minutes).
-    private let maxRecordingDuration: TimeInterval = 120.0
+    /// Last-resort timeout for a stuck recording. The physical-key watchdog and
+    /// silence detector are the primary safeguards, so legitimate long-form
+    /// dictation gets a much wider window before this backstop fires.
+    private let maxRecordingDuration = Config.recordingSafetyTimeout
     private var timeoutTimer: Timer?
 
     /// Watchdog that polls the physical trigger-key state while recording.
