@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var stateMachine: AppStateMachine!
     private var transcriptionEngine: Transcribing!
     private var audioRecorder: AudioRecorder!
+    private var audioInputManager: AudioInputDeviceManager!
     private var keyMonitor: KeyMonitor!
     
     // MARK: GUI Components
@@ -45,11 +46,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // Initialize core
         stateMachine = AppStateMachine()
         transcriptionEngine = Self.makeTranscriptionEngine(for: Config.sttBackend)
+        audioInputManager = AudioInputDeviceManager()
         Log.debug("ZeroGApp", "STT backend: \(Config.sttBackend.rawValue)")
 
         audioRecorder = AudioRecorder(
             stateMachine: stateMachine,
-            transcriptionEngine: transcriptionEngine
+            transcriptionEngine: transcriptionEngine,
+            inputDeviceProvider: { [weak self] in self?.audioInputManager.selectedDevice }
         )
 
         keyMonitor = KeyMonitor(
@@ -114,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // Initialize GUI
         statusBarController = StatusBarController(
             stateMachine: stateMachine,
+            audioInputManager: audioInputManager,
             onShowPermissions: { [weak self] in self?.onboardingController.show() },
             onCopyPolished: { [weak self] in self?.copyPolished() },
             onRetryModel: { [weak self] in self?.startModelLoad() }

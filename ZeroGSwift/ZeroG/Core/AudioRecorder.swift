@@ -35,7 +35,11 @@ final class AudioRecorder: @unchecked Sendable {
 
     // MARK: Audio Engine
     
-    private let audioEngine = AVAudioEngine()
+    typealias CaptureSessionFactory = (AudioInputDevice) throws -> AudioCaptureSession
+
+    private let inputDeviceProvider: () -> AudioInputDevice?
+    private let captureSessionFactory: CaptureSessionFactory
+    private var captureSession: AudioCaptureSession?
     private var isRecording = false
     
     // MARK: Audio Accumulation
@@ -57,14 +61,21 @@ final class AudioRecorder: @unchecked Sendable {
     
     // MARK: Lifecycle
     
-    init(stateMachine: AppStateMachine, transcriptionEngine: Transcribing) {
+    init(
+        stateMachine: AppStateMachine,
+        transcriptionEngine: Transcribing,
+        inputDeviceProvider: @escaping () -> AudioInputDevice?,
+        captureSessionFactory: @escaping CaptureSessionFactory = AVAudioCaptureSession.init(device:)
+    ) {
         self.stateMachine = stateMachine
         self.transcriptionEngine = transcriptionEngine
+        self.inputDeviceProvider = inputDeviceProvider
+        self.captureSessionFactory = captureSessionFactory
     }
     
     // MARK: - Recording Control
     
-    /// Begin capturing audio from the default input device.
+    /// Begin capturing audio from the preferred input device.
     func startRecording() {
         guard !isRecording else { return }
         
@@ -75,34 +86,57 @@ final class AudioRecorder: @unchecked Sendable {
         }
         transcribedTexts.removeAll()
         
-        let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.inputFormat(forBus: 0)
-        
-        // Ensure we have a valid format
-        guard recordingFormat.sampleRate > 0 else {
-            DispatchQueue.main.async { [weak self] in
-                self?.stateMachine.transition(to: .error("No microphone available"))
-                self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
-            }
-            return
-        }
-        
-        // Install tap on the input node for raw audio capture
-        inputNode.installTap(onBus: 0, bufferSize: AudioConstants.bufferSize, format: recordingFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer, format: recordingFormat)
-        }
-        
-        do {
-            try audioEngine.start()
-            isRecording = true
-            playFeedbackSound()
+        var lastError: Error?
+        for attempt in 1...2 {
+            guard let inputDevice = inputDeviceProvider() else { break }
 
-            Log.debug("AudioRecorder", "Recording started. Format: \(recordingFormat)")
-        } catch {
-            DispatchQueue.main.async { [weak self] in
-                self?.stateMachine.transition(to: .error("Mic Error: \(error.localizedDescription)"))
-                self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
+            do {
+                let session = try captureSessionFactory(inputDevice)
+                let recordingFormat = session.recordingFormat
+                guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
+                    Log.info(
+                        "AudioRecorder",
+                        "Input route for \(inputDevice.name) was invalid; rebuilding (attempt \(attempt)/2)."
+                    )
+                    continue
+                }
+
+                session.installTap(bufferSize: AudioConstants.bufferSize) { [weak self] buffer, format in
+                    self?.processAudioBuffer(buffer, format: format)
+                }
+
+                do {
+                    try session.start()
+                } catch {
+                    session.removeTap()
+                    session.stop()
+                    throw error
+                }
+
+                captureSession = session
+                isRecording = true
+                playFeedbackSound()
+                Log.debug(
+                    "AudioRecorder",
+                    "Recording started with \(inputDevice.name). Format: \(recordingFormat)"
+                )
+                return
+            } catch {
+                lastError = error
+                Log.error(
+                    "AudioRecorder",
+                    "Could not start input route (attempt \(attempt)/2): \(error.localizedDescription)"
+                )
             }
+        }
+
+        let diagnostic = lastError.map { ": \($0.localizedDescription)" } ?? ""
+        Log.error("AudioRecorder", "No usable microphone was available\(diagnostic)")
+        DispatchQueue.main.async { [weak self] in
+            self?.stateMachine.transition(
+                to: .error("Microphone unavailable. Choose one from the ZeroG menu")
+            )
+            self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)
         }
     }
     
@@ -112,7 +146,11 @@ final class AudioRecorder: @unchecked Sendable {
     /// stop" sequence lives in exactly one place. Must be called on the main thread
     /// (it touches the state machine).
     func beginProcessing() {
-        guard stateMachine.currentState == .recording else { return }
+        // Gate on the recorder's own truth, not the display state: if a stray
+        // UI transition ever knocks the state machine out of .recording while
+        // the engine is still capturing, the stop must still happen — a missed
+        // stop leaves the mic running and merges this session into the next.
+        guard isRecording else { return }
         stateMachine.transition(to: .processing)
         stopRecording()
     }
@@ -127,8 +165,9 @@ final class AudioRecorder: @unchecked Sendable {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Config.recordingTailDuration) { [weak self] in
             guard let self else { return }
-            self.audioEngine.inputNode.removeTap(onBus: 0)
-            self.audioEngine.stop()
+            self.captureSession?.removeTap()
+            self.captureSession?.stop()
+            self.captureSession = nil
 
             let rawAudio: [Float] = self.sampleQueue.sync { self.accumulatedSamples }
             let audioData = Self.trimTrailingSilence(rawAudio)
@@ -220,7 +259,7 @@ final class AudioRecorder: @unchecked Sendable {
         
         // Safety-only silence detection. Normal recording still ends when Control is released.
         if silenceTracker.observe(rms: rms, at: Date()) == .stop {
-            Log.debug("AudioRecorder", "Safety silence detected (>\(Config.silenceDuration)s). Auto-stopping.")
+            Log.info("AudioRecorder", "Safety silence detected (>\(Config.silenceDuration)s). Auto-stopping.")
             DispatchQueue.main.async { [weak self] in
                 self?.beginProcessing()
             }
@@ -232,24 +271,28 @@ final class AudioRecorder: @unchecked Sendable {
     /// Transcribe audio data on-device and inject the result.
     private func transcribeAndInject(audioData: [Float]) async {
         guard !audioData.isEmpty else {
+            Log.info("AudioRecorder", "No audio captured — nothing to transcribe.")
             DispatchQueue.main.async { [weak self] in
                 self?.stateMachine.transition(to: .idle)
             }
             return
         }
-        
+
         do {
             let startTime = CFAbsoluteTimeGetCurrent()
+            let audioDuration = Double(audioData.count) / AudioConstants.sampleRate
+            Log.info("AudioRecorder", "Transcribing \(String(format: "%.1f", audioDuration))s of audio...")
 
             // Transcribe
             let text = try await transcriptionEngine.transcribe(audioData)
-            
+
             let transcriptionDuration = CFAbsoluteTimeGetCurrent() - startTime
-            
-            let audioDuration = Double(audioData.count) / AudioConstants.sampleRate
-            Log.debug("AudioRecorder", "Transcribed \(String(format: "%.1f", audioDuration))s audio in \(String(format: "%.2f", transcriptionDuration))s: \(text)")
-            
+
+            Log.info("AudioRecorder", "Transcribed \(String(format: "%.1f", audioDuration))s audio in \(String(format: "%.2f", transcriptionDuration))s (\(text.count) chars)")
+            Log.debug("AudioRecorder", "Transcript: \(text)")
+
             guard !text.isEmpty else {
+                Log.info("AudioRecorder", "Empty transcription — nothing to paste.")
                 DispatchQueue.main.async { [weak self] in
                     self?.stateMachine.transition(to: .idle)
                 }
@@ -266,6 +309,7 @@ final class AudioRecorder: @unchecked Sendable {
             // Inject text. False = Accessibility missing (the injector bailed
             // before touching the pasteboard) — never show fake success.
             let injected = TextInjector.injectText(finalText)
+            Log.info("AudioRecorder", "Paste \(injected ? "OK" : "FAILED (Accessibility missing)")")
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -286,7 +330,7 @@ final class AudioRecorder: @unchecked Sendable {
             }
             
         } catch {
-            Log.debug("AudioRecorder", "Transcription error: \(error)")
+            Log.error("AudioRecorder", "Transcription error: \(error)")
             DispatchQueue.main.async { [weak self] in
                 self?.stateMachine.transition(to: .error("Processing Failed"))
                 self?.stateMachine.resetToIdle(after: Config.Timing.errorReset)

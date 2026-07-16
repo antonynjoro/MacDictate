@@ -71,6 +71,10 @@ final class OnboardingViewModel: ObservableObject {
     /// Set when Accessibility was granted but the key tap could not be created
     /// live — the step then asks the user to relaunch.
     @Published var relaunchRequired = false
+    /// Whether the one-shot OS Accessibility prompt has been fired this session.
+    /// Drives the button label (first click shows the prompt, later clicks
+    /// deep-link to Settings).
+    @Published private(set) var didPromptAccessibility = false
 
     let permissions: PermissionsManager
 
@@ -147,15 +151,25 @@ final class OnboardingViewModel: ObservableObject {
         }
     }
 
-    /// Fire the native request (pre-lists ZeroG in the pane + shows the OS
-    /// "…would like to…" prompt) and then open the pane — so the app is already
-    /// listed with a toggle when the user arrives, no "+ and hunt" friction.
+    /// First click: fire ONLY the native OS prompt ("ZeroG would like to…").
+    /// That dialog is what pre-lists ZeroG in the Accessibility pane, and its
+    /// own "Open System Settings" button lands the user on a pane where the
+    /// toggle already exists. Opening the pane ourselves in the same breath
+    /// covered the prompt and could race the pre-listing — the user arrived at
+    /// a list with no ZeroG entry.
+    ///
+    /// macOS shows that prompt at most once per app record, so later clicks
+    /// fall through to the Settings deep link (request() stays: it's a silent
+    /// no-op then, but still pre-lists after a tccutil reset). Grant detection
+    /// is the 1s poll reading AXIsProcessTrusted — never the tap (tapCreate can
+    /// succeed with events withheld, so it proves nothing about the grant).
     func requestAndOpenSettings(for step: OnboardingStep) {
         guard let kind = step.permission else { return }
-        // request() (AXIsProcessTrustedWithOptions prompt) pre-lists ZeroG in the
-        // Accessibility pane so the toggle is already there. Grant detection is the
-        // 1s poll reading AXIsProcessTrusted — never the tap (tapCreate can succeed
-        // with events withheld, so it proves nothing about the grant).
+        if kind == .accessibility && !didPromptAccessibility {
+            didPromptAccessibility = true
+            permissions.request(kind)
+            return
+        }
         permissions.request(kind)
         permissions.openSettings(for: kind)
     }
@@ -754,9 +768,14 @@ struct OnboardingWizardView: View {
         } else if granted {
             PrimaryButton(title: "Continue") { model.advance() }.riseIn(0.30)
         } else {
+            let promptFirst = model.step == .accessibility && !model.didPromptAccessibility
             VStack(spacing: 0) {
-                PrimaryButton(title: "Open System Settings") { model.requestAndOpenSettings(for: model.step) }.riseIn(0.30)
-                Text("Turn on the ZeroG toggle, then come back. We'll detect it for you.")
+                PrimaryButton(title: promptFirst ? "Allow Accessibility" : "Open System Settings") {
+                    model.requestAndOpenSettings(for: model.step)
+                }.riseIn(0.30)
+                Text(promptFirst
+                     ? "macOS will ask for permission — use its Open System Settings button."
+                     : "Turn on the ZeroG toggle, then come back. We'll detect it for you.")
                     .font(.system(size: 11)).foregroundColor(OB.textFaint)
                     .padding(.top, 12).riseIn(0.36)
             }

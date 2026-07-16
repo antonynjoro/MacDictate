@@ -91,9 +91,16 @@ final class ParakeetTranscriptionEngine: Transcribing {
             throw TranscriptionError.emptyAudio
         }
 
-        // Fresh decoder state per push-to-talk utterance (no cross-utterance carryover).
-        var state = try TdtDecoderState(decoderLayers: models.version.decoderLayers)
-        let result = try await manager.transcribe(audioArray, decoderState: &state)
+        // Hard deadline: a hung inference must surface as an error the state
+        // machine can recover from, never an indefinite .processing (the UI
+        // would otherwise sit "transcribing" forever and silently drop the
+        // user's next press).
+        let decoderLayers = models.version.decoderLayers
+        let result = try await Self.withTimeout(seconds: Self.transcribeTimeout) {
+            // Fresh decoder state per push-to-talk utterance (no cross-utterance carryover).
+            var state = try TdtDecoderState(decoderLayers: decoderLayers)
+            return try await manager.transcribe(audioArray, decoderState: &state)
+        }
 
         // Parakeet is verbatim by training ("um"/"uh" kept); strip fillers in the text
         // domain. Whisper needs no equivalent — its caption-trained decoder self-cleans.
@@ -132,6 +139,11 @@ final class ParakeetTranscriptionEngine: Transcribing {
     /// give up and surface a retryable error.
     private static let downloadTimeout: Double = 180
 
+    /// Hard deadline for a single utterance's inference. Push-to-talk audio is
+    /// capped at 120s of recording; anything past this is a hung ANE call, not
+    /// a slow one.
+    private static let transcribeTimeout: Double = 30
+
     /// Run `op` with a hard deadline. Whichever finishes first wins; the loser is
     /// cancelled. A timeout throws a transcription error the caller can retry.
     private static func withTimeout<T: Sendable>(
@@ -142,7 +154,7 @@ final class ParakeetTranscriptionEngine: Transcribing {
             group.addTask { try await op() }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw TranscriptionError.transcriptionFailed("Model download timed out")
+                throw TranscriptionError.transcriptionFailed("Timed out after \(Int(seconds))s")
             }
             defer { group.cancelAll() }
             return try await group.next()!

@@ -22,11 +22,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private var polishReasonMenuItem: NSMenuItem!
     private var polishShortcutSubmenu: NSMenu!
     private var triggerKeySubmenu: NSMenu!
+    private var audioInputSubmenu: NSMenu!
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: Dependencies
 
     private let stateMachine: AppStateMachine
+    private let audioInputManager: AudioInputDeviceManager
 
     /// Opens the permissions / setup wizard.
     private let onShowPermissions: () -> Void
@@ -40,10 +42,12 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: Initialization
 
     init(stateMachine: AppStateMachine,
+         audioInputManager: AudioInputDeviceManager,
          onShowPermissions: @escaping () -> Void = {},
          onCopyPolished: @escaping () -> Void = {},
          onRetryModel: @escaping () -> Void = {}) {
         self.stateMachine = stateMachine
+        self.audioInputManager = audioInputManager
         self.onShowPermissions = onShowPermissions
         self.onCopyPolished = onCopyPolished
         self.onRetryModel = onRetryModel
@@ -103,6 +107,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
         triggerKeyItem.submenu = triggerKeySubmenu
         menu.addItem(triggerKeyItem)
+
+        // Audio input submenu. Rebuilt whenever the menu opens so newly connected
+        // microphones appear without relaunching the app.
+        let audioInputItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        audioInputSubmenu = NSMenu()
+        rebuildAudioInputSubmenu()
+        audioInputItem.submenu = audioInputSubmenu
+        menu.addItem(audioInputItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -164,6 +176,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     /// Refresh dynamic enablement each time the menu opens — polish availability
     /// (Apple Intelligence can be toggled) and whether there's a transcription to act on.
     func menuWillOpen(_ menu: NSMenu) {
+        rebuildAudioInputSubmenu()
+
         let hasText = stateMachine.lastTranscription != nil
         copyTranscriptionMenuItem.isEnabled = hasText
 
@@ -224,6 +238,42 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         for item in triggerKeySubmenu.items {
             item.state = (item.representedObject as? String) == id ? .on : .off
         }
+    }
+
+    // MARK: - Audio Input Selection
+
+    private func rebuildAudioInputSubmenu() {
+        audioInputSubmenu.removeAllItems()
+        let devices = audioInputManager.availableDevices
+        guard !devices.isEmpty else {
+            let item = NSMenuItem(title: "No microphones available", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            audioInputSubmenu.addItem(item)
+            return
+        }
+
+        let selectedUID = audioInputManager.selectedDevice?.uid
+        for device in devices {
+            let suffix = device.isBuiltIn ? " (Default)" : ""
+            let item = NSMenuItem(
+                title: device.name + suffix,
+                action: #selector(audioInputSelected(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device.uid
+            item.state = device.uid == selectedUID ? .on : .off
+            audioInputSubmenu.addItem(item)
+        }
+    }
+
+    @objc private func audioInputSelected(_ sender: NSMenuItem) {
+        guard let uid = sender.representedObject as? String,
+              let device = audioInputManager.availableDevices.first(where: { $0.uid == uid }) else {
+            return
+        }
+        audioInputManager.select(device)
+        rebuildAudioInputSubmenu()
     }
 
     // MARK: - Permissions / Setup

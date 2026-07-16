@@ -15,7 +15,7 @@ on:
 jobs:
   test:
     name: Build and Test Swift App
-    runs-on: macos-15
+    runs-on: macos-26
     defaults:
       run:
         working-directory: ZeroGSwift

@@ -133,4 +133,17 @@ struct AppStateMachineTests {
 
         #expect(machine.currentState == .idle)
     }
+
+    @Test("resetToIdle is a no-op when a new recording started inside the delay window")
+    func resetToIdleDoesNotStompNewRecording() async throws {
+        let machine = AppStateMachine()
+        machine.transition(to: .success)
+
+        machine.resetToIdle(after: 0.01)
+        // The user pressed the trigger again before the reset fired.
+        machine.transition(to: .recording)
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(machine.currentState == .recording)
+    }
 }
